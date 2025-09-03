@@ -10,7 +10,7 @@
 namespace fs = std::filesystem;
 using namespace tiny_dnn;
 
-const int IMAGE_SIZE = 512;
+const int IMAGE_SIZE = 128;
 const int CHANNELS = 1; // grayscale
 
 void prepare_dataset() {
@@ -111,53 +111,106 @@ void train_model(const std::string& model_path) {
     }
     ifs.close();
 
+    // ДЕТАЛЬНАЯ ПРОВЕРКА ДАННЫХ
+    std::cout << "Data verification:" << std::endl;
+    std::cout << "Number of images: " << images.size() << std::endl;
+    std::cout << "Number of labels: " << labels.size() << std::endl;
+
+    if (!images.empty()) {
+        std::cout << "First image size: " << images[0].size() << " elements" << std::endl;
+        std::cout << "First image sample values: ";
+        for (int i = 0; i < 5; ++i) {
+            std::cout << images[0][i] << " ";
+        }
+        std::cout << std::endl;
+
+        std::cout << "First label: " << labels[0] << std::endl;
+    }
+
     std::cout << "Building neural network..." << std::endl;
 
-    // CNN architecture for 512x512 images
+    // УЛЬТРА-ПРОСТАЯ АРХИТЕКТУРА - только полносвязные слои
     network<sequential> net;
-    net << conv(IMAGE_SIZE, IMAGE_SIZE, 7, 1, 32, padding::same) << activation::relu()
-        << max_pool(IMAGE_SIZE, IMAGE_SIZE, 32, 2)  // 256x256
-        << conv(256, 256, 5, 32, 64, padding::same) << activation::relu()
-        << max_pool(256, 256, 64, 2)  // 128x128
-        << conv(128, 128, 3, 64, 128, padding::same) << activation::relu()
-        << max_pool(128, 128, 128, 2)  // 64x64
-        << conv(64, 64, 3, 128, 256, padding::same) << activation::relu()
-        << max_pool(64, 64, 256, 2)  // 32x32
-        << conv(32, 32, 3, 256, 512, padding::same) << activation::relu()
-        << max_pool(32, 32, 512, 2)  // 16x16
-        << fully_connected(16 * 16 * 512, 1024) << activation::relu()
-        << dropout(1024, 0.5f)
-        << fully_connected(1024, static_cast<int>(num_classes)) << activation::softmax();
 
-    std::cout << "Network architecture:" << std::endl;
-    std::cout << net << std::endl;
+    // Простая архитектура без сверточных слоев
+    net << fully_connected_layer(IMAGE_SIZE * IMAGE_SIZE, 64)
+        << activation::relu()
+        << fully_connected_layer(64, 32)
+        << activation::relu()
+        << fully_connected_layer(32, static_cast<size_t>(num_classes))
+        << activation::softmax();
 
-    // Training configuration
-    int batch_size = 32;
-    int epochs = 50;
+    std::cout << "Network architecture: Simple fully connected" << std::endl;
+
+    // Конфигурация обучения
+    int batch_size = 4;
+    int epochs = 30;  // Еще меньше для теста
+
+    // Убедимся что батч корректен
+    if (batch_size > images.size()) {
+        batch_size = images.size();
+        std::cout << "Adjusted batch size to: " << batch_size << std::endl;
+    }
+
+    std::cout << "Dataset size: " << images.size() << " images" << std::endl;
+    std::cout << "Batch size: " << batch_size << std::endl;
+    std::cout << "Number of batches: " << (images.size() + batch_size - 1) / batch_size << std::endl;
 
     adam optimizer;
-    optimizer.alpha = 0.001f;
+    optimizer.alpha = 0.0001f;
 
     std::cout << "Starting training with " << epochs << " epochs..." << std::endl;
 
-    // Use progress display and early stopping
-    net.fit<cross_entropy>(optimizer, images, labels, batch_size, epochs,
-        []() {},  // on batch complete
-        [&]() {   // on epoch complete
-            static float best_loss = std::numeric_limits<float>::max();
-            float current_loss = net.get_loss<cross_entropy>(images, labels);
-            std::cout << "Epoch complete, loss: " << current_loss << std::endl;
+    try {
+        // Простая тренировка без callback'ов
+        for (int epoch = 0; epoch < epochs; ++epoch) {
+            std::cout << "Epoch " << epoch + 1 << "/" << epochs << std::endl;
 
-            if (current_loss < best_loss) {
-                best_loss = current_loss;
-                net.save(model_path + ".best");
-                std::cout << "Saved best model with loss: " << best_loss << std::endl;
+            // Обучаем всю эпоху
+            float loss = net.train<cross_entropy>(optimizer, images, labels, batch_size);
+
+            std::cout << "Epoch " << epoch + 1 << " complete, Loss: " << loss << std::endl;
+
+            // Простая проверка предсказания
+            if (!images.empty()) {
+                try {
+                    auto result = net.predict(images[0]);
+                    std::cout << "Sample prediction: ";
+                    for (size_t i = 0; i < std::min(result.size(), size_t(3)); ++i) {
+                        std::cout << "class" << i << ":" << result[i] << " ";
+                    }
+                    std::cout << std::endl;
+                } catch (const std::exception& e) {
+                    std::cerr << "Prediction test failed: " << e.what() << std::endl;
+                }
             }
-        });
+        }
 
-    net.save(model_path);
-    std::cout << "Training complete. Model saved to: " << model_path << std::endl;
+        net.save(model_path);
+        std::cout << "Training complete. Model saved to: " << model_path << std::endl;
+
+    } catch (const std::exception& e) {
+        std::cerr << "Training error: " << e.what() << std::endl;
+
+        // Финальная попытка - обучение без батчей
+        std::cout << "Trying without batching..." << std::endl;
+
+        network<sequential> final_net;
+        final_net << fully_connected_layer(IMAGE_SIZE * IMAGE_SIZE, static_cast<size_t>(num_classes))
+                 << activation::softmax();
+
+        // Обучение на одном примере
+        if (!images.empty()) {
+            std::vector<vec_t> single_image = {images[0]};
+            std::vector<label_t> single_label = {labels[0]};
+
+            float loss = final_net.train<cross_entropy>(optimizer, images, labels, batch_size);
+            std::cout << "Single sample training loss: " << loss << std::endl;
+
+            final_net.save(model_path + ".final");
+            std::cout << "Final model saved." << std::endl;
+        }
+    }
 }
 
 void test_model(const std::string& model_path) {
